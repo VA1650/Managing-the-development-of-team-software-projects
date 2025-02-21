@@ -2,8 +2,23 @@ from flask import Flask, request, jsonify
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
+import os
+from werkzeug.utils import secure_filename  # Для безопасного имени файла
+
 
 app = Flask(__name__)
+
+UPLOAD_FOLDER = './Ready_doc'  # Папка для сохранения файлов
+ALLOWED_EXTENSIONS = {'docx', 'pdf', 'txt'}  # Разрешенные расширения файлов
+
+app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
+
+# Функция для проверки расширения файла
+def allowed_file(filename):
+    return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
+
+
+
 
 # Конфигурация базы данных (SQLite в папке DB)
 DATABASE_URL = "sqlite:///./DB/db.db"  # Путь к БД
@@ -118,41 +133,63 @@ def get_template():
         db.close() # Не забываем закрывать сессию!
         
 @app.route("/add_signed_document", methods=["POST"])
-
 def add_signed_document():
     db = SessionLocal()
     try:
-        data = request.get_json()
-        date = data.get("date")
-        hours = data.get("hours")
-        rate_per_hour = data.get("rate_per_hour")
-        legalEntities = data.get("legalEntities")
-        signatories = data.get("signatories")
-        link = data.get("link")
+        # Проверяем, есть ли файл в запросе
+        if 'file' not in request.files:
+            return jsonify({"error": "No file part"}), 400
 
-        # Вычисляем сумму контракта (можно перенести на фронтенд)
-        sum = hours * rate_per_hour
+        file = request.files['file']
 
-        # Создаем новую запись в таблице ReadyDoc
-        new_doc = ReadyDoc(
-            date=date,
-            sum=sum,
-            legalEntities=legalEntities,
-            signatories=signatories,
-            link=link
-        )
+        # Если пользователь не выбрал файл, браузер отправляет пустой файл
+        if file.filename == '':
+            return jsonify({"error": "No selected file"}), 400
 
-        db.add(new_doc)
-        db.commit()
+        if file and allowed_file(file.filename):
+            filename = secure_filename(file.filename)  # Безопасное имя файла
 
-        return jsonify({"message": "Документ успешно добавлен."}), 201  # 201 Created
+            # Создаем папку, если она не существует
+            if not os.path.exists(app.config['UPLOAD_FOLDER']):
+                os.makedirs(app.config['UPLOAD_FOLDER'])
+
+            filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
+            file.save(filepath)  # Сохраняем файл
+
+            # Получаем остальные данные из формы
+            date = request.form.get("date") #request.form вместо request.get_json()
+            hours = request.form.get("hours")
+            rate_per_hour = request.form.get("rate_per_hour")
+            legalEntities = request.form.get("legalEntities")
+            signatories = request.form.get("signatories")
+
+            # Вычисляем сумму контракта
+            sum = float(hours) * float(rate_per_hour)
+
+            # Создаем новую запись в таблице ReadyDoc
+            new_doc = ReadyDoc(
+                date=date,
+                sum=sum,
+                legalEntities=legalEntities,
+                signatories=signatories,
+                link=filepath  # Сохраняем путь к файлу
+            )
+
+            db.add(new_doc)
+            db.commit()
+
+            return jsonify({"message": "Документ успешно добавлен."}), 201
+
+        else:
+            return jsonify({"error": "Invalid file type"}), 400
 
     except Exception as e:
         print(e)  # Логировать ошибку!
         return jsonify({"error": str(e)}), 500
 
     finally:
-        db.close()
+         db.close()
+
 
 
 if __name__ == "__main__":
