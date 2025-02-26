@@ -158,13 +158,9 @@ def add_signed_document():
 
             # Получаем остальные данные из формы
             date = request.form.get("date") #request.form вместо request.get_json()
-            hours = request.form.get("hours")
-            rate_per_hour = request.form.get("rate_per_hour")
             legalEntities = request.form.get("legalEntities")
             signatories = request.form.get("signatories")
-
-            # Вычисляем сумму контракта
-            sum = float(hours) * float(rate_per_hour)
+            sum = request.form.get("sum")
 
             # Создаем новую запись в таблице ReadyDoc
             new_doc = ReadyDoc(
