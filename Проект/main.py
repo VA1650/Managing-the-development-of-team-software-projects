@@ -1,55 +1,58 @@
 
-from flask import Flask, request, jsonify
+from flask import Flask, request, jsonify, abort
 from sqlalchemy import create_engine, Column, Integer, String, ForeignKey
 from sqlalchemy.orm import sessionmaker, relationship
 from sqlalchemy.ext.declarative import declarative_base
 import os
-from werkzeug.utils import secure_filename  # Для безопасного имени файла
+from werkzeug.utils import secure_filename
+from werkzeug.security import generate_password_hash, check_password_hash
+import functools
 
 
 app = Flask(__name__)
 
-UPLOAD_FOLDER = './Ready_doc'  # Папка для сохранения файлов
-ALLOWED_EXTENSIONS = {'docx', 'pdf', 'txt'}  # Разрешенные расширения файлов
+UPLOAD_FOLDER = './Ready_doc'
+ALLOWED_EXTENSIONS = {'docx', 'pdf', 'txt'}
 
 app.config['UPLOAD_FOLDER'] = UPLOAD_FOLDER
 
-# Функция для проверки расширения файла
+
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
 
-
-
-# Конфигурация базы данных (SQLite в папке DB)
-DATABASE_URL = "sqlite:///./DB/db.db"  # Путь к БД
-engine = create_engine(DATABASE_URL, echo=True)  # echo=True для отладки SQL-запросов
+DATABASE_URL = "sqlite:///./DB/db.db"
+engine = create_engine(DATABASE_URL, echo=False)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 Base = declarative_base()
 
-# Определение моделей таблиц
+
 class Doctype(Base):
     __tablename__ = "Doctype"
     type = Column(String, primary_key=True, index=True)
+
 
 class LegalEntities(Base):
     __tablename__ = "LegalEntities"
     name = Column(String, primary_key=True, index=True)
     director = Column(String)
 
+
 class Ourfirm(Base):
     __tablename__ = "Ourfirm"
     name = Column(String, primary_key=True, index=True)
     director = Column(String)
 
+
 class ReadyDoc(Base):
     __tablename__ = "ReadyDoc"
     id = Column(Integer, primary_key=True, index=True)
-    date = Column(String)  
+    date = Column(String)
     sum = Column(Integer)
     legalEntities = Column(String, ForeignKey("LegalEntities.name"))
-    signatories = Column(String)  
+    signatories = Column(String)
     link = Column(String)
+
 
 class DocTemp(Base):
     __tablename__ = "DocTemp"
@@ -61,10 +64,29 @@ class DocTemp(Base):
     legal_entity = relationship("LegalEntities", backref="templates")
     doctype = relationship("Doctype", backref="templates")
 
-# Создание таблиц (если их еще нет)
+
+class Employees(Base):
+    __tablename__ = "Employees"
+    employee = Column(String, primary_key=True, unique=True, index=True)
+    rate = Column(Integer, nullable=False)
+
+
+class Users(Base):
+    __tablename__ = "Users"
+    id = Column(Integer, primary_key=True, index=True)
+    username = Column(String, unique=True, nullable=False)
+    password_hash = Column(String(128), nullable=False)
+
+    def set_password(self, password):
+        self.password_hash = generate_password_hash(password)
+
+    def check_password(self, password):
+        return check_password_hash(self.password_hash, password)
+
+
 Base.metadata.create_all(bind=engine)
 
-# Функция для получения сессии БД
+
 def get_db():
     db = SessionLocal()
     try:
@@ -72,8 +94,74 @@ def get_db():
     finally:
         db.close()
 
-# API endpoint для поиска шаблона
+
+def token_required(f):
+    @functools.wraps(f)
+    def decorated(*args, **kwargs):
+        auth = request.authorization
+        if not auth or not auth.username or not auth.password:
+            return jsonify({'message': 'Authentication required'}), 401
+
+        db = SessionLocal()
+        try:
+            user = db.query(Users).filter_by(username=auth.username).first()
+            if not user or not user.check_password(auth.password):
+                return jsonify({'message': 'Invalid credentials'}), 401
+        finally:
+            db.close()
+
+        return f(*args, **kwargs)
+
+    return decorated
+
+
+@app.route('/login', methods=['POST'])
+def login():
+    auth = request.authorization
+    if not auth or not auth.username or not auth.password:
+        return jsonify({'message': 'Authentication required'}), 401
+
+    db = SessionLocal()
+    try:
+        user = db.query(Users).filter_by(username=auth.username).first()
+        if not user or not user.check_password(auth.password):
+            return jsonify({'message': 'Invalid credentials'}), 401
+
+        return jsonify({'message': 'Login successful'})
+    finally:
+        db.close()
+
+
+@app.route('/create_user', methods=['POST'])
+def create_user():
+    data = request.get_json()
+    if not data or 'username' not in data or 'password' not in data:
+        return jsonify({'message': 'Missing data'}), 400
+
+    username = data['username']
+    password = data['password']
+
+    db = SessionLocal()
+    try:
+        # Проверяем, существует ли уже пользователь с таким username
+        existing_user = db.query(Users).filter(Users.username == username).first()
+        if existing_user:
+            return jsonify({'message': 'User already exists'}), 400
+
+        new_user = Users(username=username)
+        new_user.set_password(password)
+        db.add(new_user)
+        db.commit()
+        return jsonify({'message': 'User created successfully'}), 201
+    except Exception as e:
+        db.rollback()
+        return jsonify({'message': str(e)}), 500
+    finally:
+        db.close()
+
+
 @app.route("/get_template", methods=["POST"])
+@token_required
 def get_template():
     db = SessionLocal()
     try:
@@ -82,7 +170,6 @@ def get_template():
         user_input_company = data.get("company_name", "").strip()
         user_input_director = data.get("director_name", "").strip()
 
-        # 1. Нормализация типа документа
         document_type_mapping = {
             "заявка": "Заказ",
             "заказ": "Заказ",
@@ -91,30 +178,23 @@ def get_template():
         }
         document_type = document_type_mapping.get(user_input_type, user_input_type.capitalize())
 
-        # 2. Поиск шаблона в DocTemp
         template = db.query(DocTemp).join(Doctype).join(LegalEntities).filter(
             LegalEntities.name == user_input_company,
             Doctype.type == document_type
         ).first()
 
-
         if template:
-            # Шаблон найден
             return jsonify({"template_link": template.link})
         else:
-            # Шаблон не найден, проверка и добавление компании/типа при необходимости
             company = db.query(LegalEntities).filter(LegalEntities.name == user_input_company).first()
             if not company:
-                # Компания не найдена, добавляем новую
                 new_company = LegalEntities(name=user_input_company, director=user_input_director)
                 db.add(new_company)
                 db.commit()
             else:
-                # Компания найдена
-                # Проверяем, присутствует ли поле director_name в запросе
-                if "director_name" in data and data["director_name"]: # Проверка на наличие и непустое значение
-                    company.director = data["director_name"]  # Обновляем директора
-                    db.commit()  # Сохраняем изменения
+                if "director_name" in data and data["director_name"]:
+                    company.director = data["director_name"]
+                    db.commit()
 
             doctype = db.query(Doctype).filter(Doctype.type == document_type).first()
             if not doctype:
@@ -124,57 +204,59 @@ def get_template():
 
             return jsonify({"message": "Шаблон не найден. Необходимо создать шаблон вручную."})
 
-
     finally:
-        db.close() # Не забываем закрывать сессию!
-        
+        db.close()
+
+
 @app.route("/add_signed_document", methods=["POST"])
+@token_required
 def add_signed_document():
     db = SessionLocal()
     try:
-        # Проверяем, есть ли файл в запросе
         if 'file' not in request.files:
             return jsonify({"error": "No file part"}), 400
 
         file = request.files['file']
 
-        # Если пользователь не выбрал файл, браузер отправляет пустой файл
         if file.filename == '':
             return jsonify({"error": "No selected file"}), 400
 
         if file and allowed_file(file.filename):
-            filename = secure_filename(file.filename)  # Безопасное имя файла
+            filename = secure_filename(file.filename)
 
-            # Создаем папку, если она не существует
             if not os.path.exists(app.config['UPLOAD_FOLDER']):
                 os.makedirs(app.config['UPLOAD_FOLDER'])
 
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
-            file.save(filepath)  # Сохраняем файл
+            file.save(filepath)
 
-            # Получаем остальные данные из формы
-            date = request.form.get("date") #request.form вместо request.get_json()
+            date = request.form.get("date")
             legalEntities = request.form.get("legalEntities")
             signatories = request.form.get("signatories")
-            sum_str = request.form.get("sum")
+            hours_worked_str = request.form.get("hours_worked")
+            employee_name = request.form.get("employee_name")  # Получаем имя сотрудника из формы
 
-            if sum_str:
-                try:
-                   sum = int(sum_str) # Преобразуем строку в целое число
-                except ValueError:
-                    return jsonify({"error": "Invalid sum value"}), 400
-            else:
-                sum = 0  # Если сумма не указана, устанавливаем в 0 или другое значение по умолчанию
+            if not hours_worked_str or not employee_name:
+                return jsonify({"error": "Missing hours_worked or employee_name value"}), 400
 
+            try:
+                hours_worked = float(hours_worked_str)
+            except ValueError:
+                return jsonify({"error": "Invalid hours_worked value"}), 400
 
-            
-	    # Создаем новую запись в таблице ReadyDoc
+            employee = db.query(Employees).filter(Employees.employee == employee_name).first()
+            if not employee:
+                return jsonify({"error": "Employee not found"}), 404
+
+            hourly_rate = employee.rate
+            sum = int(hourly_rate * hours_worked)
+
             new_doc = ReadyDoc(
                 date=date,
                 sum=sum,
                 legalEntities=legalEntities,
                 signatories=signatories,
-                link=filepath  # Сохраняем путь к файлу
+                link=filepath
             )
 
             db.add(new_doc)
@@ -186,43 +268,39 @@ def add_signed_document():
             return jsonify({"error": "Invalid file type"}), 400
 
     except Exception as e:
-        db.rollback()  # Откатываем транзакцию в случае ошибки
-        print(e)  # Логировать ошибку!
+        db.rollback()
+        print(e)
         return jsonify({"error": str(e)}), 500
 
     finally:
-         db.close()
+        db.close()
 
 
 @app.route("/create_template", methods=["POST"])
+@token_required
 def create_template():
     db = SessionLocal()
     try:
-        # Проверяем, есть ли файл в запросе
         if 'file' not in request.files:
             return jsonify({"error": "No file part"}), 400
 
         file = request.files['file']
 
-        # Если пользователь не выбрал файл, браузер отправляет пустой файл
         if file.filename == '':
             return jsonify({"error": "No selected file"}), 400
 
         if file and allowed_file(file.filename):
             filename = secure_filename(file.filename)
 
-            # Создаем папку, если она не существует
             if not os.path.exists(app.config['UPLOAD_FOLDER']):
                 os.makedirs(app.config['UPLOAD_FOLDER'])
 
             filepath = os.path.join(app.config['UPLOAD_FOLDER'], filename)
             file.save(filepath)
 
-            # Получаем остальные данные из формы
             company_name = request.form.get("company_name")
             document_type = request.form.get("document_type")
 
-            # Проверяем, существуют ли компания и тип документа
             company = db.query(LegalEntities).filter(LegalEntities.name == company_name).first()
             doctype = db.query(Doctype).filter(Doctype.type == document_type).first()
 
@@ -232,7 +310,6 @@ def create_template():
             if not doctype:
                 return jsonify({"error": "Document type not found"}), 400
 
-            # Создаем новый шаблон
             new_template = DocTemp(
                 compName=company_name,
                 docType=document_type,
@@ -247,13 +324,12 @@ def create_template():
             return jsonify({"error": "Invalid file type"}), 400
 
     except Exception as e:
-        db.rollback()  # Откатываем транзакцию в случае ошибки
+        db.rollback()
         print(e)
         return jsonify({"error": str(e)}), 500
 
     finally:
         db.close()
-
 
 
 if __name__ == "__main__":
