@@ -1,7 +1,33 @@
 from . import db
-from sqlalchemy import Column, Integer, String, ForeignKey
+from sqlalchemy import Column, Integer, String, ForeignKey, Date, Numeric
 from sqlalchemy.orm import relationship
 from werkzeug.security import generate_password_hash, check_password_hash
+import datetime  # Import the datetime module
+from sqlalchemy.types import TypeDecorator, NUMERIC
+from decimal import Decimal
+
+
+
+class NumericDecimal(TypeDecorator):
+    """Enables Decimal fields to be read/written by SQLAlchemy."""
+
+    impl = NUMERIC(precision=18, scale=2, asdecimal=True)  # Set precision and scale as needed
+    cache_ok = True
+
+    def process_bind_param(self, value, dialect):
+        if value is not None:
+            return str(value)
+        return value
+
+    def process_result_value(self, value, dialect):
+        if value is not None:
+            return Decimal(value)
+        return value
+
+    class Settings(db.Model):
+        __tablename__ = "Settings"
+        id = Column(Integer, primary_key=True, index=True)
+        vat_rate = Column(NumericDecimal, default=Decimal('0.05'))  # Ставка НДС, по умолчанию 5%
 
 class Doctype(db.Model):
     __tablename__ = "Doctype"
@@ -23,12 +49,12 @@ class Ourfirm(db.Model):
 class ReadyDoc(db.Model):
     __tablename__ = "ReadyDoc"
     id = Column(Integer, primary_key=True, index=True)
-    date = Column(String)
+    date = Column(Date)  # Changed to Date type
     sum = Column(Integer)
     legalEntities = Column(String, ForeignKey("LegalEntities.name"))
     signatories = Column(String)
     link = Column(String)
-
+    document_number = Column(Integer)  # Номер документа в месяце
 
 class DocTemp(db.Model):
     __tablename__ = "DocTemp"
